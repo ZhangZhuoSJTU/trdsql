@@ -17,6 +17,27 @@ type CSVReader struct {
 	preRead   [][]string
 	limitRead bool
 	needNULL  bool
+	uniform   bool
+}
+
+// wideTable is the number of columns at which a table counts as wide
+// enough for the uniform fast path to pay off.
+const wideTable = 8
+
+// uniformLayout reports whether the pre-read rows establish a fixed
+// column layout: every row already carries the full width, so records
+// from the same producer can be copied into place without reconciling
+// each field against the column count.
+func uniformLayout(names []string, preRead [][]string) bool {
+	if len(names) < wideTable {
+		return false
+	}
+	for _, row := range preRead {
+		if len(row) != len(names) {
+			return false
+		}
+	}
+	return true
 }
 
 // NewCSVReader returns CSVReader and error.
@@ -85,6 +106,7 @@ func NewCSVReader(reader io.Reader, opts *ReadOpts) (*CSVReader, error) {
 		}
 		r.preRead = append(r.preRead, rows)
 	}
+	r.uniform = uniformLayout(r.names, r.preRead)
 	r.setColumnType()
 	return r, nil
 }
@@ -163,6 +185,17 @@ func (r *CSVReader) ReadRow(row []any) ([]any, error) {
 	if err != nil {
 		return row, err
 	}
+	if r.uniform {
+		// The layout was fixed by the pre-read rows, so the record can
+		// be copied straight into the row.
+		fillRow(row, record)
+		if r.needNULL {
+			for i := range row {
+				row[i] = replaceNULL(r.inNULL, row[i])
+			}
+		}
+		return row, nil
+	}
 	for i := 0; len(row) > i; i++ {
 		if len(record) > i {
 			row[i] = record[i]
@@ -174,4 +207,13 @@ func (r *CSVReader) ReadRow(row []any) ([]any, error) {
 		}
 	}
 	return row, nil
+}
+
+// fillRow copies a record from a uniform producer into row. Such
+// records always carry the full column width, so the fields are moved
+// in one pass without per-field reconciliation.
+func fillRow(row []any, record []string) {
+	for i := range row {
+		row[i] = record[i]
+	}
 }
